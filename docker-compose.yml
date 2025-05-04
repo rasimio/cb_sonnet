@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: tensortrade-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./saved_models:/app/saved_models
+      - ./backtest_results:/app/backtest_results
+      - ./logs:/app/logs
+      - ./config:/app/config
+    command: python main.py
+    environment:
+      - CONFIG_PATH=/app/config/default_config.yaml
+      - PYTHONPATH=/app
+      - TZ=UTC
+
+  training:
+    build: .
+    container_name: tensortrade-training
+    restart: "no"
+    volumes:
+      - ./data:/app/data
+      - ./saved_models:/app/saved_models
+      - ./logs:/app/logs
+      - ./config:/app/config
+    command: python main.py --mode train --model lstm --symbol BTCUSDT --timeframe 1h
+    environment:
+      - CONFIG_PATH=/app/config/default_config.yaml
+      - PYTHONPATH=/app
+      - TZ=UTC
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  backtest:
+    build: .
+    container_name: tensortrade-backtest
+    restart: "no"
+    volumes:
+      - ./data:/app/data
+      - ./saved_models:/app/saved_models
+      - ./backtest_results:/app/backtest_results
+      - ./logs:/app/logs
+      - ./config:/app/config
+    command: python main.py --mode backtest --model lstm --symbol BTCUSDT --timeframe 1h
+    environment:
+      - CONFIG_PATH=/app/config/default_config.yaml
+      - PYTHONPATH=/app
+      - TZ=UTC
+
+  live:
+    build: .
+    container_name: tensortrade-live
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./saved_models:/app/saved_models
+      - ./logs:/app/logs
+      - ./config:/app/config
+    command: python main.py --mode live --model lstm --symbol BTCUSDT --timeframe 1h
+    environment:
+      - CONFIG_PATH=/app/config/default_config.yaml
+      - PYTHONPATH=/app
+      - TZ=UTC
+
+volumes:
+  data:
+  saved_models:
+  backtest_results:
+  logs:
