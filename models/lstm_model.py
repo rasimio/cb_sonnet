@@ -344,7 +344,7 @@ class LSTMModel:
                 # We need to add more features (padding with zeros)
                 padding = np.zeros((normalized_data.shape[0], required_feature_count - current_feature_count))
                 normalized_data = np.hstack((normalized_data, padding))
-                logger.info(f"Added padding to match feature count: {current_feature_count} -> {required_feature_count}")
+                # logger.info(f"Added padding to match feature count: {current_feature_count} -> {required_feature_count}")
             elif current_feature_count > required_feature_count:
                 # We need to truncate features
                 normalized_data = normalized_data[:, :required_feature_count]
@@ -380,8 +380,8 @@ class LSTMModel:
                 return normalized.values
         except Exception as e:
             # Fallback if anything goes wrong
-            logger.error(f"Error in normalization: {str(e)}")
-            logger.warning("Using zero-mean, unit-variance normalization as fallback")
+            # logger.error(f"Error in normalization: {str(e)}")
+            # logger.warning("Using zero-mean, unit-variance normalization as fallback")
 
             # Simple z-score normalization
             mean = features_df.mean()

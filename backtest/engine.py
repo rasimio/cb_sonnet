@@ -51,6 +51,7 @@ class BacktestEngine:
         self.positions = []
         self.trades = []
         self.trades_history = []
+        self.data = None  # Store the data reference
 
     def run(self, data: pd.DataFrame) -> Dict[str, Any]:
         """
@@ -62,48 +63,59 @@ class BacktestEngine:
         Returns:
             Dictionary with backtest results
         """
+        # Store the data reference
+        self.data = data
+
+        # Log the full data range before any filtering
+        logger.info(f"Full data range: {data.index[0]} to {data.index[-1]}, total rows: {len(data)}")
+
         # Reset state
         self.capital = self.initial_capital
-        self.equity_curve = [self.initial_capital]
+        self.equity_curve = []
         self.positions = []
         self.trades = []
         self.trades_history = []
 
         # Minimum required data for the model
         min_data_length = getattr(self.model, 'window_size', 60)
+        logger.info(f"Model requires minimum {min_data_length} data points")
+
+        # Verify if we have enough data
+        if len(data) < min_data_length:
+            logger.error(f"Not enough data points: {len(data)} available, {min_data_length} required")
+            return {'metrics': {}, 'equity_curve': pd.Series(), 'position_history': pd.Series(),
+                    'trades_history': [], 'data': data}
 
         # Initialize equity and position tracking
-        equity_history = [self.initial_capital]
-        position_history = [0]  # 0 = no position, 1 = long, -1 = short
+        equity_history = []
+        position_history = []
 
-        # Process each bar in the backtest
-        logger.info(f"Starting backtest with {len(data)} data points")
-
-        # Get model type to determine prediction format
-        model_type = self.model.__class__.__name__
-
-        for i in tqdm(range(min_data_length, len(data)), desc="Backtesting"):
-            # Get current price data
+        # For each date in the data, generate an equity value
+        for i in tqdm(range(len(data)), desc="Backtesting"):
             current_date = data.index[i]
             current_price = data.iloc[i]['close']
 
-            # Prepare data for prediction
+            # If we don't have enough data yet for prediction, just record initial capital
+            if i < min_data_length:
+                equity_history.append(self.initial_capital)
+                position_history.append(0)  # No position
+                continue
+
+            # Prepare data for prediction - use data up to current point
             prediction_data = data.iloc[:i + 1]
 
             # Get prediction from model
+            model_type = self.model.__class__.__name__
             if model_type == 'LSTMModel':
                 # Get price prediction or direction
                 prediction = self.model.predict(prediction_data)
 
                 # Generate trading signal based on prediction
                 if self.model.config.get('target_type', 'price') == 'price':
-                    # If predicting price, compare with current price
                     signal = 1 if prediction > current_price else -1
                 elif self.model.config.get('target_type', 'price') == 'return':
-                    # If predicting return, check sign
                     signal = 1 if prediction > 0 else -1
                 else:
-                    # If predicting direction (0 or 1), convert to -1 or 1
                     signal = 1 if prediction > 0.5 else -1
 
             elif model_type == 'RLModel':
@@ -129,11 +141,10 @@ class BacktestEngine:
             if signal is not None:
                 self._process_signal(signal, current_price, current_date)
 
-            # Update equity curve
+            # Update equity and position for this date
             current_equity = self._calculate_equity(current_price)
             equity_history.append(current_equity)
 
-            # Update position history
             current_position = 1 if any(p['type'] == 'long' for p in self.positions) else -1 if any(
                 p['type'] == 'short' for p in self.positions) else 0
             position_history.append(current_position)
@@ -143,15 +154,21 @@ class BacktestEngine:
         final_date = data.index[-1]
         self._close_all_positions(final_price, final_date)
 
+        # Create proper Series with date index for the full data range
+        self.equity_curve = pd.Series(equity_history, index=data.index)
+        self.position_history = pd.Series(position_history, index=data.index)
+
+        logger.info(f"Equity curve generated from {self.equity_curve.index[0]} to {self.equity_curve.index[-1]}")
+
         # Calculate backtest metrics
         metrics = self._calculate_metrics(data, equity_history, position_history)
 
         # Create result object
         results = {
             'metrics': metrics,
-            'equity_curve': pd.Series(equity_history, index=data.index[min_data_length - 1:]),
-            'position_history': pd.Series(position_history, index=data.index[min_data_length - 1:]),
-            'trades': self.trades_history,
+            'equity_curve': self.equity_curve,
+            'position_history': self.position_history,
+            'trades_history': self.trades_history,
             'data': data
         }
 
@@ -161,7 +178,7 @@ class BacktestEngine:
 
     def _process_signal(self, signal: int, current_price: float, current_date: datetime) -> None:
         """
-        Process a trading signal
+        Process a trading signal - modified for spot trading only (no shorts)
 
         Args:
             signal: Trading signal (1 = buy, -1 = sell, 0 = close)
@@ -172,29 +189,15 @@ class BacktestEngine:
         current_positions_count = len(self.positions)
 
         if signal == 1:  # Buy signal (go long)
-            # Close any existing short positions
-            for pos in list(self.positions):
-                if pos['type'] == 'short':
-                    self._close_position(pos, current_price, current_date)
-
-            # Open a new long position if we have capacity
-            if current_positions_count < self.max_open_positions or current_positions_count == 0:
+            # Open a new long position if we have capacity and no existing positions
+            if current_positions_count == 0:
                 self._open_position('long', current_price, current_date)
 
-        elif signal == -1:  # Sell signal (go short)
+        elif signal == -1 or signal == 0:  # Sell signal or Close signal
             # Close any existing long positions
             for pos in list(self.positions):
                 if pos['type'] == 'long':
                     self._close_position(pos, current_price, current_date)
-
-            # Open a new short position if we have capacity
-            if current_positions_count < self.max_open_positions or current_positions_count == 0:
-                self._open_position('short', current_price, current_date)
-
-        elif signal == 0:  # Close signal
-            # Close all positions
-            for pos in list(self.positions):
-                self._close_position(pos, current_price, current_date)
 
     def _open_position(self, position_type: str, price: float, date: datetime) -> None:
         """
@@ -435,6 +438,68 @@ class BacktestEngine:
         }
 
         return metrics
+
+    def generate_trade_history_csv(self, symbol: str, output_path: str = None) -> str:
+        """
+        Generate a detailed CSV file with trade history
+
+        Args:
+            symbol: Trading symbol
+            output_path: Path to save the CSV file (optional)
+
+        Returns:
+            Path to the generated CSV file
+        """
+        try:
+            # Import the logger module (import here to avoid circular imports)
+            from utils.backtest_logger import generate_trade_history_csv
+
+            # Create results dictionary with necessary fields
+            results = {
+                'trades_history': self.trades_history,
+                'equity_curve': self.equity_curve,
+                'metrics': self._calculate_metrics(self.data, self.equity_curve, self.position_history)
+            }
+
+            # Generate and return the CSV path
+            return generate_trade_history_csv(results, symbol, output_path)
+
+        except Exception as e:
+            logger.error(f"Error generating trade history CSV: {str(e)}")
+            raise
+
+    def generate_performance_dashboard(self, symbol: str, output_dir: str = None) -> str:
+        """
+        Generate a performance dashboard from backtest results
+
+        Args:
+            symbol: Trading symbol
+            output_dir: Directory to save dashboard files (optional)
+
+        Returns:
+            Path to the generated dashboard HTML
+        """
+        try:
+            # Import the logger module (import here to avoid circular imports)
+            from utils.backtest_logger import generate_performance_dashboard
+
+            # Generate trade history CSV first
+            csv_path = self.generate_trade_history_csv(symbol)
+
+            # Create results dictionary with necessary fields
+            results = {
+                'trades_history': self.trades_history,
+                'equity_curve': self.equity_curve,
+                'metrics': self._calculate_metrics(self.data, self.equity_curve, self.position_history),
+                'data': self.data
+            }
+
+            # Generate and return the dashboard path
+            return generate_performance_dashboard(results, symbol, csv_path, output_dir)
+
+        except Exception as e:
+            logger.error(f"Error generating performance dashboard: {str(e)}")
+            raise
 
 
 def run_single_backtest(model, data, initial_capital=10000, **kwargs):

@@ -9,6 +9,8 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+import pandas as pd
+from datetime import datetime
 
 from api.routes import router
 from utils.config import load_config
@@ -17,15 +19,19 @@ from utils.logging_utils import setup_logging
 # Setup argument parser
 parser = argparse.ArgumentParser(description='TensorTrade - LSTM & RL Trading Bot')
 parser.add_argument('--config', type=str, default='config/default_config.yaml',
-                   help='Path to configuration file')
+                    help='Path to configuration file')
 parser.add_argument('--mode', type=str, choices=['api', 'train', 'backtest', 'live'],
-                   default='api', help='Application mode')
+                    default='api', help='Application mode')
 parser.add_argument('--model', type=str, choices=['lstm', 'rl', 'ensemble'],
-                   default='ensemble', help='Model type to use')
+                    default='ensemble', help='Model type to use')
 parser.add_argument('--symbol', type=str, default='BTCUSDT',
-                   help='Trading symbol')
+                    help='Trading symbol')
 parser.add_argument('--timeframe', type=str, default='1h',
-                   help='Trading timeframe')
+                    help='Trading timeframe')
+parser.add_argument('--generate_logs', action='store_true',
+                    help='Generate detailed trade history logs and performance dashboard')
+parser.add_argument('--output_dir', type=str, default=None,
+                    help='Directory to save output files (optional)')
 
 # Create directories if they don't exist
 for directory in ['logs', 'saved_models', 'data']:
@@ -34,6 +40,47 @@ for directory in ['logs', 'saved_models', 'data']:
 # Setup logging
 setup_logging()
 logger = logging.getLogger(__name__)
+
+
+def diagnose_data_loading(config, args):
+    """Diagnostic function to check data loading and date ranges"""
+    import pandas as pd
+    from data.data_loader import DataLoader
+
+    # Print config values
+    print(f"Config start_date: {config['backtest'].get('start_date')}")
+    print(f"Config end_date: {config['backtest'].get('end_date')}")
+
+    # Load data with explicit date range
+    data_loader = DataLoader(
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        start_date=config['backtest'].get('start_date'),
+        end_date=config['backtest'].get('end_date'),
+        data_source=config['data'].get('source')
+    )
+
+    data = data_loader.load_data()
+
+    # Print data info
+    print(f"\nLoaded {len(data)} data points")
+    print(f"Data date range: {data.index[0]} to {data.index[-1]}")
+
+    # Check for gaps in data
+    date_diff = data.index.to_series().diff().dropna()
+    expected_diff = pd.Timedelta(hours=int(args.timeframe.rstrip('h')))
+    gaps = date_diff[date_diff > expected_diff]
+
+    if len(gaps) > 0:
+        print(f"\nFound {len(gaps)} gaps in data:")
+        for date, gap in gaps.items():
+            print(f"Gap at {date}: {gap}")
+
+    # Print the last 10 dates in the dataset
+    print("\nLast 10 dates in dataset:")
+    for date in data.index[-10:]:
+        print(date)
+
 
 def create_app():
     """Create and configure the FastAPI application"""
@@ -56,6 +103,7 @@ def create_app():
     app.include_router(router)
 
     return app
+
 
 def run_training(config, args):
     """Run model training with given configuration"""
@@ -106,6 +154,46 @@ def run_training(config, args):
     model.save(model_path)
     logger.info(f"Model saved to {model_path}")
 
+    def diagnose_data_loading(config, args):
+        """Diagnostic function to check data loading and date ranges"""
+        import pandas as pd
+        from data.data_loader import DataLoader
+
+        # Print config values
+        print(f"Config start_date: {config['backtest'].get('start_date')}")
+        print(f"Config end_date: {config['backtest'].get('end_date')}")
+
+        # Load data with explicit date range
+        data_loader = DataLoader(
+            symbol=args.symbol,
+            timeframe=args.timeframe,
+            start_date=config['backtest'].get('start_date'),
+            end_date=config['backtest'].get('end_date'),
+            data_source=config['data'].get('source')
+        )
+
+        data = data_loader.load_data()
+
+        # Print data info
+        print(f"\nLoaded {len(data)} data points")
+        print(f"Data date range: {data.index[0]} to {data.index[-1]}")
+
+        # Check for gaps in data
+        date_diff = data.index.to_series().diff().dropna()
+        expected_diff = pd.Timedelta(hours=int(args.timeframe.rstrip('h')))
+        gaps = date_diff[date_diff > expected_diff]
+
+        if len(gaps) > 0:
+            print(f"\nFound {len(gaps)} gaps in data:")
+            for date, gap in gaps.items():
+                print(f"Gap at {date}: {gap}")
+
+        # Print the last 10 dates in the dataset
+        print("\nLast 10 dates in dataset:")
+        for date in data.index[-10:]:
+            print(date)
+
+
 def run_backtest(config, args):
     """Run backtest with given configuration"""
     from models.model_factory import load_model
@@ -115,15 +203,25 @@ def run_backtest(config, args):
 
     logger.info(f"Starting backtest for {args.model} model on {args.symbol} {args.timeframe}")
 
-    # Load data
+    # diagnose_data_loading(config, args)
+    # exit(0)
+
+    # Load data - make sure start and end dates are explicitly passed
     data_loader = DataLoader(
         symbol=args.symbol,
         timeframe=args.timeframe,
-        start_date=config['backtest'].get('start_date'),
-        end_date=config['backtest'].get('end_date'),
+        start_date=config['backtest'].get('start_date', '2025-02-01'),  # Explicit default
+        end_date=config['backtest'].get('end_date', '2025-05-01'),  # Explicit default
         data_source=config['data'].get('source')
     )
     data = data_loader.load_data()
+
+    # Log the actual data range to debug
+    if len(data) > 0:
+        logger.info(f"Loaded data from {data.index[0]} to {data.index[-1]}, total rows: {len(data)}")
+    else:
+        logger.error("No data loaded!")
+        return
 
     # Load model
     model_path = os.path.join('saved_models', f"{args.model}_{args.symbol}_{args.timeframe}")
@@ -138,11 +236,52 @@ def run_backtest(config, args):
     )
     results = backtest_engine.run(data)
 
-    # Generate visualization
-    perfomance_charts.plot_backtest_results(results,
-                         output_path=f"backtest_results_{args.model}_{args.symbol}_{args.timeframe}.html")
+    # Fix the key name mismatch for perfomance_charts
+    results['trades'] = results['trades_history']
+
+    # Log the equity curve date range
+    if isinstance(results['equity_curve'], pd.Series) and len(results['equity_curve']) > 0:
+        logger.info(f"Equity curve from {results['equity_curve'].index[0]} to {results['equity_curve'].index[-1]}")
+
+    # Generate standard visualization
+    viz_path = f"backtest_results_{args.model}_{args.symbol}_{args.timeframe}.html"
+    perfomance_charts.plot_backtest_results(results, output_path=viz_path)
+
+    print(f"\nBacktest completed. Visualization saved to: {os.path.abspath(viz_path)}")
+
+    # Always generate detailed trade history CSV
+    try:
+        # Create output directory if it doesn't exist
+        output_dir = "backtest_results"
+        if hasattr(args, 'output_dir') and args.output_dir:
+            output_dir = args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Generate trade history CSV
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_filename = f"trade_history_{args.symbol}_{args.timeframe}_{timestamp}.csv"
+        csv_path = os.path.join(output_dir, csv_filename)
+
+        csv_path = backtest_engine.generate_trade_history_csv(args.symbol, csv_path)
+
+        # Generate performance dashboard if the flag is set
+        if hasattr(args, 'generate_logs') and args.generate_logs:
+            dashboard_path = backtest_engine.generate_performance_dashboard(args.symbol)
+            print(f"Performance dashboard generated: {os.path.abspath(dashboard_path)}")
+
+        # Print summary to console
+        print("\nBacktest Summary:")
+        print(f"Total Return: {results['metrics']['total_return_pct']:.2f}%")
+        print(f"Sharpe Ratio: {results['metrics']['sharpe_ratio']:.2f}")
+        print(f"Max Drawdown: {results['metrics']['max_drawdown_pct']:.2f}%")
+        print(f"Win Rate: {results['metrics']['win_rate_pct']:.2f}%")
+        print(f"Total Trades: {results['metrics']['total_trades']}")
+    except Exception as e:
+        logger.error(f"Error generating detailed logs: {str(e)}")
+        print(f"\nError generating trade logs: {str(e)}")
 
     logger.info(f"Backtest completed. Results saved.")
+
 
 def run_live_trading(config, args):
     """Run live trading with given configuration"""
@@ -200,6 +339,7 @@ def run_live_trading(config, args):
     finally:
         exchange.close()
 
+
 def main():
     """Main application entry point"""
     args = parser.parse_args()
@@ -221,6 +361,7 @@ def main():
         run_live_trading(config, args)
     else:
         logger.error(f"Unknown mode: {args.mode}")
+
 
 if __name__ == "__main__":
     main()

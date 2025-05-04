@@ -167,7 +167,7 @@ class DataLoader:
 
     def _load_from_binance(self) -> pd.DataFrame:
         """
-        Load data from Binance API
+        Load data from Binance API using multiple requests to overcome the 1000 limit
 
         Returns:
             DataFrame with OHLCV data
@@ -187,47 +187,82 @@ class DataLoader:
         start_ms = int(self.start_date.timestamp() * 1000) if self.start_date else None
         end_ms = int(self.end_date.timestamp() * 1000)
 
-        # Build URL
-        base_url = "https://api.binance.com/api/v3/klines"
-        params = {
-            'symbol': self.symbol.upper(),
-            'interval': interval,
-            'endTime': end_ms,
-            'limit': 1000  # Max limit
+        # Calculate estimated number of candles based on timeframe and date range
+        timeframe_to_minutes = {
+            '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30,
+            '1h': 60, '2h': 120, '4h': 240, '6h': 360, '8h': 480, '12h': 720,
+            '1d': 1440, '3d': 4320, '1w': 10080, '1M': 43200
         }
 
-        if start_ms:
-            params['startTime'] = start_ms
+        minutes = timeframe_to_minutes.get(interval, 60)  # Default to 1h if unknown
+        time_diff = (self.end_date - self.start_date).total_seconds() / 60 if self.start_date else None
+        estimated_candles = int(time_diff / minutes) if time_diff else None
 
-        # Fetch data in chunks if needed
+        logger.info(f"Estimated {estimated_candles} candles needed for date range")
+
+        # This is how many separate requests we'll need to make to cover the entire range
+        # Adding 1 to be safe
+        num_requests_needed = (estimated_candles // 1000) + 1 if estimated_candles else 1
+        logger.info(f"Need to make approximately {num_requests_needed} requests")
+
+        # Split the time range into chunks
+        # We'll define chunk start and end times and fetch each chunk separately
+        time_chunks = []
+        chunk_size_ms = (end_ms - start_ms) // num_requests_needed
+
+        for i in range(num_requests_needed):
+            chunk_start = start_ms + (i * chunk_size_ms)
+            chunk_end = start_ms + ((i + 1) * chunk_size_ms) if i < num_requests_needed - 1 else end_ms
+            time_chunks.append((chunk_start, chunk_end))
+
+        # Fetch data for each chunk
         all_candles = []
-        while True:
-            logger.info(f"Fetching data from Binance: {params}")
-            response = requests.get(base_url, params=params)
+
+        for i, (chunk_start, chunk_end) in enumerate(time_chunks):
+            params = {
+                'symbol': self.symbol.upper(),
+                'interval': interval,
+                'startTime': chunk_start,
+                'endTime': chunk_end,
+                'limit': 1000  # Max limit
+            }
+
+            logger.info(f"Fetching chunk {i + 1}/{len(time_chunks)}: {params}")
+            response = requests.get("https://api.binance.com/api/v3/klines", params=params)
 
             if response.status_code != 200:
-                raise Exception(f"Error fetching data from Binance: {response.text}")
+                logger.error(f"Error fetching data from Binance: {response.text}")
+                continue
 
             candles = response.json()
+
             if not candles:
-                break
+                logger.warning(f"No data returned for chunk {i + 1}")
+                continue
 
             all_candles.extend(candles)
+            logger.info(f"Fetched {len(candles)} candles in chunk {i + 1}, total so far: {len(all_candles)}")
 
-            # Update parameters for next request
-            params['endTime'] = candles[0][0] - 1  # End time is the start of first candle - 1
+        if not all_candles:
+            logger.warning("No data fetched from Binance")
+            return pd.DataFrame()
 
-            # Break if we've reached the start date or have enough data
-            if start_ms and params['endTime'] <= start_ms:
-                break
+        # Ensure data is in chronological order (oldest first)
+        all_candles.sort(key=lambda x: x[0])
 
-            # Avoid excessive requests
-            if len(all_candles) >= 10000:
-                logger.warning("Reached maximum data points (10,000)")
-                break
+        # Remove duplicates (in case chunks overlapped)
+        unique_candles = []
+        timestamps = set()
+
+        for candle in all_candles:
+            if candle[0] not in timestamps:
+                timestamps.add(candle[0])
+                unique_candles.append(candle)
+
+        logger.info(f"After removing duplicates: {len(unique_candles)} unique candles")
 
         # Create DataFrame
-        df = pd.DataFrame(all_candles, columns=[
+        df = pd.DataFrame(unique_candles, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
             'close_time', 'quote_asset_volume', 'number_of_trades',
             'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
@@ -244,6 +279,12 @@ class DataLoader:
 
         # Select only OHLCV columns
         df = df[['open', 'high', 'low', 'close', 'volume']]
+
+        # Log data range
+        if not df.empty:
+            logger.info(f"Loaded data from {df.index[0]} to {df.index[-1]}, total rows: {len(df)}")
+        else:
+            logger.warning("No data loaded from Binance API")
 
         return df
 

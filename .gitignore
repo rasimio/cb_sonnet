@@ -3,3 +3,4 @@
 saved_models
 *.html
 logs
+backtest_results

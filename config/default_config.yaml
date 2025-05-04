@@ -79,7 +79,7 @@ training:
   batch_size: 64
   validation_split: 0.2
   shuffle: true
-  start_date: 2024-12-01
+  start_date: 2024-11-01
   end_date: 2025-03-01
 
 # Backtest settings
@@ -91,13 +91,13 @@ backtest:
   take_profit_pct: 0.04
   max_open_positions: 1
   start_date: 2025-02-01
-  end_date: 2025-04-01
+  end_date: 2025-05-01
 
 # Live trading settings
 live:
   exchange: binance
-  api_key: ""
-  api_secret: ""
+  api_key: "dnpkso9I8Cabom9fBhYvsf7wVHo3xsnpEbzkGV5UDjaoI2fefNMPIf6SFzQ8B577"
+  api_secret: "FAT7wXRlnrexj1EOBCvwXWYq0sDk60FqkIEs9v1ZZ65Oy4HPhcuv6tBYPyF2Xx0v"
   initial_capital: 1000.0
   max_risk_per_trade: 0.02
   max_open_positions: 1
